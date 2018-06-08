@@ -45,11 +45,9 @@ func TestScanShard(t *testing.T) {
 	// callback fn simply appends the record data to result string
 	var (
 		resultData string
-		fn         = func(r *Record) ScanError {
+		fn         = func(r *Record) error {
 			resultData += string(r.Data)
-			err := errors.New("some error happened")
-			return ScanError{
-				Error:          err,
+			return &ScanError{
 				StopScan:       false,
 				SkipCheckpoint: false,
 			}

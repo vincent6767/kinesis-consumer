@@ -13,9 +13,12 @@ import (
 // ScanError signals the consumer if we should continue scanning for next record
 // and whether to checkpoint.
 type ScanError struct {
-	Error          error
 	StopScan       bool
 	SkipCheckpoint bool
+}
+
+func (e *ScanError) Error() string {
+	return fmt.Sprintf("scan error stop=%t, skipCheckpoint=%t", e.StopScan, e.SkipCheckpoint)
 }
 
 // Record is an alias of record returned from kinesis library
@@ -119,7 +122,7 @@ type Consumer struct {
 
 // Scan scans each of the shards of the stream, calls the callback
 // func with each of the kinesis records.
-func (c *Consumer) Scan(ctx context.Context, fn func(*Record) ScanError) error {
+func (c *Consumer) Scan(ctx context.Context, fn func(*Record) error) error {
 	shardIDs, err := c.client.GetShardIDs(c.streamName)
 	if err != nil {
 		return fmt.Errorf("get shards error: %v", err)
@@ -163,40 +166,44 @@ func (c *Consumer) Scan(ctx context.Context, fn func(*Record) ScanError) error {
 
 // ScanShard loops over records on a specific shard, calls the callback func
 // for each record and checkpoints the progress of scan.
-// Note: Returning `false` from the callback func will end the scan.
-func (c *Consumer) ScanShard(ctx context.Context, shardID string, fn func(*Record) ScanError) (err error) {
+func (c *Consumer) ScanShard(ctx context.Context, shardID string, fn func(*Record) error) error {
 	lastSeqNum, err := c.checkpoint.Get(c.streamName, shardID)
 	if err != nil {
 		return fmt.Errorf("get checkpoint error: %v", err)
 	}
 
 	c.logger.Println("scanning", shardID, lastSeqNum)
+
 	// get records
 	recc, errc, err := c.client.GetRecords(ctx, c.streamName, shardID, lastSeqNum)
 	if err != nil {
 		return fmt.Errorf("get records error: %v", err)
 	}
+
 	// loop records
 	for r := range recc {
-		scanError := fn(r)
-		// It will be nicer if this can be reported with checkpoint error
-		err = scanError.Error
+		err := fn(r)
 
-		// Skip invalid state
-		if scanError.StopScan && scanError.SkipCheckpoint {
-			continue
-		}
-
-		if scanError.StopScan {
-			break
-		}
-
-		if !scanError.SkipCheckpoint {
-			c.counter.Add("records", 1)
-			err := c.checkpoint.Set(c.streamName, shardID, *r.SequenceNumber)
-			if err != nil {
-				return fmt.Errorf("set checkpoint error: %v", err)
+		if err != nil {
+			if scanError, ok := err.(*ScanError); ok {
+				if scanError.StopScan && scanError.SkipCheckpoint {
+					break
+				}
+				if scanError.SkipCheckpoint {
+					continue
+				}
+			} else {
+				return err
 			}
+		}
+
+		c.counter.Add("records", 1)
+		if cerr := c.checkpoint.Set(c.streamName, shardID, *r.SequenceNumber); cerr != nil {
+			return fmt.Errorf("set checkpoint error: %v", cerr)
+		}
+
+		if err != nil {
+			break
 		}
 	}
 
